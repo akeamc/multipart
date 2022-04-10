@@ -14,7 +14,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use futures_core::{Stream, TryStream};
+use futures_core::{ready, Stream, TryStream};
 use http::{
     header::{self, HeaderName, InvalidHeaderName, InvalidHeaderValue},
     HeaderMap, HeaderValue,
@@ -91,10 +91,9 @@ where
         };
 
         if r.buf.is_empty() {
-            match r.poll_extend(cx) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
-                Poll::Pending => return Poll::Pending,
+            match ready!(r.poll_extend(cx)) {
+                Ok(()) => {}
+                Err(e) => return Poll::Ready(Some(Err(e))),
             }
         }
 
@@ -117,10 +116,9 @@ where
                     r.state = State::Body;
                     return Poll::Ready(Some(Ok(part)));
                 }
-                Ok(None) => match r.poll_extend(cx) {
-                    Poll::Ready(Ok(())) => continue, // read headers again
-                    Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
-                    Poll::Pending => return Poll::Pending,
+                Ok(None) => match ready!(r.poll_extend(cx)) {
+                    Ok(()) => continue, // read headers again
+                    Err(e) => return Poll::Ready(Some(Err(e))),
                 },
                 Err(e) => return Poll::Ready(Some(Err(e))),
             }
@@ -169,10 +167,9 @@ where
         assert!(!(r.state != State::Body), "wrong state");
 
         if r.buf.is_empty() {
-            match r.poll_extend(cx) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(e)) => return Poll::Ready(Some(Err(e))),
-                Poll::Pending => return Poll::Pending,
+            match ready!(r.poll_extend(cx)) {
+                Ok(()) => {}
+                Err(e) => return Poll::Ready(Some(Err(e))),
             }
         }
 
@@ -293,14 +290,13 @@ impl<S> InnerMultipart<S> {
     where
         S: TryStream<Ok = Bytes, Error = E> + Unpin,
     {
-        match Pin::new(&mut self.stream).try_poll_next(cx) {
-            Poll::Ready(Some(Ok(chunk))) => {
+        match ready!(Pin::new(&mut self.stream).try_poll_next(cx)) {
+            Some(Ok(chunk)) => {
                 self.buf.extend_from_slice(&chunk);
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Some(Err(e))) => Poll::Ready(Err(MultipartError::Upstream(e))),
-            Poll::Ready(None) => Poll::Ready(Err(MultipartError::UnexpectedEof)),
-            Poll::Pending => Poll::Pending,
+            Some(Err(e)) => Poll::Ready(Err(MultipartError::Upstream(e))),
+            None => Poll::Ready(Err(MultipartError::UnexpectedEof)),
         }
     }
 }
