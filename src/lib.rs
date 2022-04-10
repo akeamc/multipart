@@ -62,7 +62,7 @@ pub struct Multipart<S> {
 
 impl<S> Multipart<S> {
     /// Construct a new parser from a given boundary and payload.
-    pub fn from_boundary(boundary: Boundary, payload: S) -> Self {
+    pub fn new(boundary: Boundary, payload: S) -> Self {
         Self {
             inner: Rc::new(RefCell::new(InnerMultipart {
                 boundary,
@@ -71,16 +71,6 @@ impl<S> Multipart<S> {
                 state: State::Skip,
             })),
         }
-    }
-
-    /// Construct a new parser from some headers and a payload.
-    ///
-    /// # Errors
-    ///
-    /// If the boundary cannot be properly extracted from the `Content-Type`
-    /// header, this function will return an error.
-    pub fn new<E>(b: Boundary, payload: S) -> Result<Self, MultipartError<E>> {
-        Ok(Self::from_boundary(b, payload))
     }
 }
 
