@@ -1,0 +1,15 @@
+[package]
+name = "multipart"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bytes = "1.1.0"
+futures-core = "0.3.21"
+http = "0.2.6"
+httparse = "1.6.0"
+memchr = "2.4.1"
+mime = "0.3.16"
+thiserror = "1.0.30"
