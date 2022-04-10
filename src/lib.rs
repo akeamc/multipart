@@ -39,7 +39,7 @@ impl<S> Drop for BodyPart<S> {
 
 #[derive(Debug)]
 struct InnerMultipart<S> {
-    boundary: String,
+    boundary: Boundary,
     state: State,
     stream: S,
     buf: BytesMut,
@@ -62,10 +62,10 @@ pub struct Multipart<S> {
 
 impl<S> Multipart<S> {
     /// Construct a new parser from a given boundary and payload.
-    pub fn from_boundary(boundary: impl Into<String>, payload: S) -> Self {
+    pub fn from_boundary(boundary: Boundary, payload: S) -> Self {
         Self {
             inner: Rc::new(RefCell::new(InnerMultipart {
-                boundary: boundary.into(),
+                boundary,
                 stream: payload,
                 buf: BytesMut::new(),
                 state: State::Skip,
@@ -79,21 +79,8 @@ impl<S> Multipart<S> {
     ///
     /// If the boundary cannot be properly extracted from the `Content-Type`
     /// header, this function will return an error.
-    pub fn new<E>(headers: &HeaderMap, payload: S) -> Result<Self, MultipartError<E>> {
-        let content_type = headers
-            .get(header::CONTENT_TYPE)
-            .ok_or(MultipartError::NoContentType)?
-            .to_str()
-            .ok()
-            .and_then(|s| s.parse::<Mime>().ok())
-            .ok_or(MultipartError::ParseContentType)?;
-
-        let boundary = content_type
-            .get_param(mime::BOUNDARY)
-            .ok_or(MultipartError::Boundary)?
-            .as_str();
-
-        Ok(Self::from_boundary(boundary, payload))
+    pub fn new<E>(b: Boundary, payload: S) -> Result<Self, MultipartError<E>> {
+        Ok(Self::from_boundary(b, payload))
     }
 }
 
@@ -319,6 +306,108 @@ impl<S> InnerMultipart<S> {
     }
 }
 
+/// Boundary extraction error.
+#[derive(Debug, thiserror::Error)]
+pub enum InvalidBoundary {
+    /// `Content-Type` header missing.
+    #[error("missing content-type")]
+    NoContentType,
+
+    /// `Content-Type` could not be parsed.
+    #[error("failed to parse the content-type header")]
+    ParseContentType,
+
+    /// No boundary specified.
+    #[error("no boundary specified")]
+    NoBoundary,
+}
+
+impl From<mime::FromStrError> for InvalidBoundary {
+    fn from(_: mime::FromStrError) -> Self {
+        Self::ParseContentType
+    }
+}
+
+/// A multipart boundary.
+#[derive(Debug)]
+pub struct Boundary(String);
+
+impl AsRef<str> for Boundary {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Boundary {
+    /// Construct a new [`Boundary`].
+    pub fn new(data: impl Into<String>) -> Self {
+        Self(data.into())
+    }
+
+    /// Convert a header into a [`Boundary`].
+    ///
+    /// # Errors
+    ///
+    /// - invalid mime type
+    /// - mime cannot be parsed to boundary
+    pub fn try_from_header(h: &str) -> Result<Self, InvalidBoundary> {
+        Self::try_from(&h.parse::<Mime>()?)
+    }
+
+    /// Get the length of the boundary in bytes.
+    #[must_use]
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Get the boundary as bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl TryFrom<&Mime> for Boundary {
+    type Error = InvalidBoundary;
+
+    fn try_from(value: &Mime) -> Result<Self, Self::Error> {
+        value
+            .get_param(mime::BOUNDARY)
+            .ok_or(InvalidBoundary::NoBoundary)
+            .map(|n| Self::new(n.to_string()))
+    }
+}
+
+impl TryFrom<&HeaderMap> for Boundary {
+    type Error = InvalidBoundary;
+
+    fn try_from(value: &HeaderMap) -> Result<Self, Self::Error> {
+        let ct = value
+            .get(header::CONTENT_TYPE)
+            .ok_or(InvalidBoundary::NoContentType)?
+            .to_str()
+            .map_err(|_| InvalidBoundary::ParseContentType)?;
+
+        Boundary::try_from_header(ct)
+    }
+}
+
+#[cfg(feature = "actix")]
+impl TryFrom<&actix_http::header::HeaderMap> for Boundary {
+    type Error = InvalidBoundary;
+
+    fn try_from(value: &actix_http::header::HeaderMap) -> Result<Self, Self::Error> {
+        let ct = value
+            .get(header::CONTENT_TYPE)
+            .ok_or(InvalidBoundary::NoContentType)?
+            .to_str()
+            .map_err(|_| InvalidBoundary::ParseContentType)?;
+
+        Boundary::try_from_header(ct)
+    }
+}
+
 /// Headers parsing error.
 #[derive(Debug, thiserror::Error)]
 pub enum ParseHeadersError {
@@ -354,17 +443,9 @@ pub enum MultipartError<E> {
     #[error("{0}")]
     ParseHeaders(ParseHeadersError),
 
-    /// No `Content-Type` specified on the main request.
-    #[error("missing content-type header")]
-    NoContentType,
-
-    /// The `Content-Type` could not be properly parsed.
-    #[error("failed to parse the content-type header")]
-    ParseContentType,
-
-    /// No boundary specified.
-    #[error("no boundary specified")]
-    Boundary,
+    /// Boundary extraction error.
+    #[error("cannot get boundary: {0}")]
+    Boundary(#[from] InvalidBoundary),
 }
 
 impl<E> From<httparse::Error> for MultipartError<E> {
