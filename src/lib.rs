@@ -142,6 +142,15 @@ impl<S> BodyPart<S> {
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
     }
+
+    /// Get and parse the `Content-Type`.
+    #[must_use]
+    pub fn content_type(&self) -> Option<Mime> {
+        self.headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.parse().ok())
+    }
 }
 
 impl<S, E> Stream for BodyPart<S>
