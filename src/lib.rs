@@ -1,4 +1,28 @@
-#![doc = include_str!("../README.md")]
+//! ```
+//! # tokio_test::block_on(async {
+//! use bytes::Bytes;
+//! use futures::{future, stream, StreamExt};
+//! use multipart::{Boundary, Multipart};
+//!
+//! let data = "Content-Type: text/plain\r
+//! \r
+//! Hello World!
+//! --xoxo";
+//! let mut multipart = Multipart::new(Boundary::new("xoxo"), stream::once(future::ready(Result::<Bytes, ()>::Ok(data.into()))));
+//!
+//! while let Some(res) = multipart.next().await {
+//!     let mut part = res?;
+//!     let mut body = String::new();
+//!
+//!     while let Some(res) = part.next().await {
+//!         body.push_str(std::str::from_utf8(&res?).unwrap());
+//!     }
+//!
+//!     assert!(body.len() > 0);
+//! }
+//! # Result::<(), multipart::MultipartError<()>>::Ok(())
+//! # });
+//! ```
 #![deny(
     unreachable_pub,
     missing_debug_implementations,
@@ -14,7 +38,7 @@ use std::{
 };
 
 use bytes::{Bytes, BytesMut};
-use futures_core::{ready, Stream, TryStream};
+use futures::{ready, Stream, TryStream};
 use http::{
     header::{self, HeaderName, InvalidHeaderName, InvalidHeaderValue},
     HeaderMap, HeaderValue,
@@ -55,12 +79,18 @@ enum State {
 }
 
 /// A multipart request.
+///
+/// **Each body part must be either read to completion or dropped before polling the next
+/// body part, since they share the underlying stream.**
 #[derive(Debug)]
 pub struct Multipart<S> {
     inner: Rc<RefCell<InnerMultipart<S>>>,
 }
 
-impl<S> Multipart<S> {
+impl<S> Multipart<S>
+where
+    S: Stream,
+{
     /// Construct a new parser from a given boundary and payload.
     pub fn new(boundary: Boundary, payload: S) -> Self {
         Self {
@@ -81,14 +111,13 @@ where
     type Item = Result<BodyPart<S>, MultipartError<E>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut r = match self.inner.try_borrow_mut() {
-            Ok(r) => match r.state {
-                State::Skip | State::Headers => r,
-                State::Body => return Poll::Pending,
-                State::Eof => return Poll::Ready(None),
-            },
-            Err(_) => return Poll::Pending, // the reader is in use by a body part
-        };
+        let mut r = self.inner.borrow_mut();
+
+        match r.state {
+            State::Skip | State::Headers => {}
+            State::Body => panic!("drop the previous body part before polling next"),
+            State::Eof => return Poll::Ready(None),
+        }
 
         if r.buf.is_empty() {
             match ready!(r.poll_extend(cx)) {
@@ -104,7 +133,11 @@ where
                     r.state = State::Eof;
                     return Poll::Ready(None);
                 }
-                None => return Poll::Pending,
+                None => {
+                    // buffer exhausted without meeting a boundary
+                    drop(r);
+                    return self.poll_next(cx);
+                }
             }
         }
 
@@ -158,7 +191,7 @@ where
     type Item = Result<Bytes, MultipartError<E>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let mut r = self.inner.try_borrow_mut().unwrap();
+        let mut r = self.inner.borrow_mut();
 
         if self.done {
             return Poll::Ready(None);
@@ -435,7 +468,7 @@ pub enum MultipartError<E> {
     UnexpectedEof,
 
     /// Failed to parse headers.
-    #[error("{0}")]
+    #[error("parse headers failed: {0}")]
     ParseHeaders(ParseHeadersError),
 
     /// Boundary extraction error.
@@ -458,5 +491,54 @@ impl<E> From<InvalidHeaderName> for MultipartError<E> {
 impl<E> From<InvalidHeaderValue> for MultipartError<E> {
     fn from(e: InvalidHeaderValue) -> Self {
         Self::ParseHeaders(ParseHeadersError::InvalidValue(e))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::BytesMut;
+    use futures::{future, stream, StreamExt};
+
+    use crate::{Boundary, Multipart};
+
+    #[tokio::test]
+    async fn simple_multipart() {
+        const BODY: &[u8] = b"--xoxo\r\nContent-Type: text/plain\r\n\r\nYooo\n--xoxo\r\nContent-Type: text/plain\r\n\r\nhello there\n--xoxo--";
+
+        let mut multipart = Multipart::new(
+            Boundary::new("xoxo"),
+            stream::once(future::ready(Result::<_, ()>::Ok(BODY.into()))),
+        );
+
+        let first = multipart.next().await.unwrap().unwrap();
+        assert_eq!(
+            first.headers().get("content-type"),
+            Some(&"text/plain".parse().unwrap())
+        );
+        drop(first);
+
+        let mut second = multipart.next().await.unwrap().unwrap();
+        let mut data = BytesMut::new();
+        while let Some(res) = second.next().await {
+            data.extend(res.unwrap());
+        }
+
+        assert_eq!(data.freeze(), b"hello there\n".as_slice());
+    }
+
+    // The previous part needs to be dropped before the next is read, since they share
+    // the underlying stream. This should therefore panic.
+    #[tokio::test]
+    #[should_panic]
+    async fn next_part_without_drop() {
+        const BODY: &[u8] = b"--xoxo\r\nContent-Type: text/plain\r\n\r\nYooo\n--xoxo\r\nContent-Type: text/plain\r\n\r\nhello there\n--xoxo--";
+
+        let mut multipart = Multipart::new(
+            Boundary::new("xoxo"),
+            stream::once(future::ready(Result::<_, ()>::Ok(BODY.into()))),
+        );
+
+        let _first = multipart.next().await.unwrap().unwrap();
+        let _second = multipart.next().await.unwrap().unwrap(); // panic here
     }
 }

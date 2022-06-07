@@ -8,7 +8,7 @@ edition = "2021"
 [dependencies]
 actix-http = { version = "3.0.4", optional = true }
 bytes = "1.1.0"
-futures-core = "0.3.21"
+futures = "0.3.21"
 http = "0.2.6"
 httparse = "1.6.0"
 memchr = "2.4.1"
@@ -17,3 +17,7 @@ thiserror = "1.0.30"
 
 [features]
 actix = ["dep:actix-http"]
+
+[dev-dependencies]
+tokio = { version = "1.19.2", features = ["macros", "rt-multi-thread"] }
+tokio-test = "0.4.2"
