@@ -8,7 +8,10 @@
 //! \r
 //! Hello World!
 //! --xoxo";
-//! let mut multipart = Multipart::new(Boundary::new("xoxo"), stream::once(future::ready(Result::<Bytes, ()>::Ok(data.into()))));
+//! let mut multipart = Multipart::from_body(
+//!     stream::once(future::ready(Result::<Bytes, ()>::Ok(data.into()))),
+//!     Boundary::new("xoxo"),
+//! );
 //!
 //! while let Some(res) = multipart.next().await {
 //!     let mut part = res?;
@@ -49,20 +52,20 @@ use mime::Mime;
 
 /// A part of a multipart body.
 #[derive(Debug)]
-pub struct BodyPart<S> {
+pub struct Field<S> {
     headers: HeaderMap,
-    inner: Rc<RefCell<InnerMultipart<S>>>,
+    inner: Rc<RefCell<MultipartStreamer<S>>>,
     done: bool,
 }
 
-impl<S> Drop for BodyPart<S> {
+impl<S> Drop for Field<S> {
     fn drop(&mut self) {
         self.inner.borrow_mut().state = State::Skip;
     }
 }
 
 #[derive(Debug)]
-struct InnerMultipart<S> {
+struct MultipartStreamer<S> {
     boundary: Boundary,
     state: State,
     stream: S,
@@ -80,23 +83,23 @@ enum State {
 
 /// A multipart request.
 ///
-/// **Each body part must be either read to completion or dropped before polling the next
-/// body part, since they share the underlying stream.**
+/// **Each field must be either read to completion or dropped before polling the next
+/// field, since they share the same underlying stream.**
 #[derive(Debug)]
 pub struct Multipart<S> {
-    inner: Rc<RefCell<InnerMultipart<S>>>,
+    inner: Rc<RefCell<MultipartStreamer<S>>>,
 }
 
 impl<S> Multipart<S>
 where
     S: Stream,
 {
-    /// Construct a new parser from a given boundary and payload.
-    pub fn new(boundary: Boundary, payload: S) -> Self {
+    /// Construct a new parser from a given boundary and body.
+    pub fn from_body(body: S, boundary: Boundary) -> Self {
         Self {
-            inner: Rc::new(RefCell::new(InnerMultipart {
+            inner: Rc::new(RefCell::new(MultipartStreamer {
                 boundary,
-                stream: payload,
+                stream: body,
                 buf: BytesMut::new(),
                 state: State::Skip,
             })),
@@ -108,14 +111,14 @@ impl<S, E> Stream for Multipart<S>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
 {
-    type Item = Result<BodyPart<S>, MultipartError<E>>;
+    type Item = Result<Field<S>, MultipartError<E>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut r = self.inner.borrow_mut();
 
         match r.state {
             State::Skip | State::Headers => {}
-            State::Body => panic!("drop the previous body part before polling next"),
+            State::Body => panic!("drop the previous field before polling next"),
             State::Eof => return Poll::Ready(None),
         }
 
@@ -145,7 +148,7 @@ where
         loop {
             match r.read_headers() {
                 Ok(Some(headers)) => {
-                    let part = BodyPart::new(headers, self.inner.clone());
+                    let part = Field::new(headers, self.inner.clone());
                     r.state = State::Body;
                     return Poll::Ready(Some(Ok(part)));
                 }
@@ -159,16 +162,16 @@ where
     }
 }
 
-impl<S> BodyPart<S> {
-    fn new(headers: HeaderMap, reader: Rc<RefCell<InnerMultipart<S>>>) -> Self {
+impl<S> Field<S> {
+    fn new(headers: HeaderMap, streamer: Rc<RefCell<MultipartStreamer<S>>>) -> Self {
         Self {
-            inner: reader,
+            inner: streamer,
             headers,
             done: false,
         }
     }
 
-    /// Get the headers associated with this body part.
+    /// Get the headers associated with this field.
     #[must_use]
     pub fn headers(&self) -> &HeaderMap {
         &self.headers
@@ -184,7 +187,7 @@ impl<S> BodyPart<S> {
     }
 }
 
-impl<S, E> Stream for BodyPart<S>
+impl<S, E> Stream for Field<S>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
 {
@@ -196,8 +199,6 @@ where
         if self.done {
             return Poll::Ready(None);
         }
-
-        assert!(!(r.state != State::Body), "wrong state");
 
         if r.buf.is_empty() {
             match ready!(r.poll_extend(cx)) {
@@ -229,11 +230,10 @@ where
 
 const MAX_HEADERS: usize = 32;
 
-/// Maximum size of the header section for each
-/// body part. (16 KiB).
+/// Maximum size of the header section for each field. (16 KiB).
 const MAX_HEADER_SECTION_SIZE: usize = 16 << 10;
 
-impl<S> InnerMultipart<S> {
+impl<S> MultipartStreamer<S> {
     /// Search for a needle, and return all bytes up to and **including
     /// the needle**, if it's found.
     ///
@@ -505,9 +505,9 @@ mod tests {
     async fn simple_multipart() {
         const BODY: &[u8] = b"--xoxo\r\nContent-Type: text/plain\r\n\r\nYooo\n--xoxo\r\nContent-Type: text/plain\r\n\r\nhello there\n--xoxo--";
 
-        let mut multipart = Multipart::new(
-            Boundary::new("xoxo"),
+        let mut multipart = Multipart::from_body(
             stream::once(future::ready(Result::<_, ()>::Ok(BODY.into()))),
+            Boundary::new("xoxo"),
         );
 
         let first = multipart.next().await.unwrap().unwrap();
@@ -533,9 +533,9 @@ mod tests {
     async fn next_part_without_drop() {
         const BODY: &[u8] = b"--xoxo\r\nContent-Type: text/plain\r\n\r\nYooo\n--xoxo\r\nContent-Type: text/plain\r\n\r\nhello there\n--xoxo--";
 
-        let mut multipart = Multipart::new(
-            Boundary::new("xoxo"),
+        let mut multipart = Multipart::from_body(
             stream::once(future::ready(Result::<_, ()>::Ok(BODY.into()))),
+            Boundary::new("xoxo"),
         );
 
         let _first = multipart.next().await.unwrap().unwrap();
