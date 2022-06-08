@@ -23,7 +23,7 @@
 //!
 //!     assert!(body.len() > 0);
 //! }
-//! # Result::<(), multipart::MultipartError<()>>::Ok(())
+//! # Result::<(), multipart::Error<()>>::Ok(())
 //! # });
 //! ```
 #![deny(
@@ -111,7 +111,7 @@ impl<S, E> Stream for Multipart<S>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
 {
-    type Item = Result<Field<S>, MultipartError<E>>;
+    type Item = Result<Field<S>, Error<E>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut r = self.inner.borrow_mut();
@@ -191,7 +191,7 @@ impl<S, E> Stream for Field<S>
 where
     S: Stream<Item = Result<Bytes, E>> + Unpin,
 {
-    type Item = Result<Bytes, MultipartError<E>>;
+    type Item = Result<Bytes, Error<E>>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut r = self.inner.borrow_mut();
@@ -243,12 +243,12 @@ impl<S> MultipartStreamer<S> {
         memmem::find(&self.buf, needle).map(|idx| self.buf.split_to(idx + needle.len()).freeze())
     }
 
-    fn read_headers<E>(&mut self) -> Result<Option<HeaderMap>, MultipartError<E>> {
+    fn read_headers<E>(&mut self) -> Result<Option<HeaderMap>, Error<E>> {
         let bytes = if let Some(bytes) = self.read_until(b"\r\n\r\n") {
             bytes
         } else {
             if self.buf.len() > MAX_HEADER_SECTION_SIZE {
-                return Err(MultipartError::ParseHeaders(
+                return Err(Error::ParseHeaders(
                     ParseHeadersError::HeaderOverflow,
                 ));
             }
@@ -271,7 +271,7 @@ impl<S> MultipartStreamer<S> {
 
                 Ok(Some(headers))
             }
-            Ok(httparse::Status::Partial) => Err(MultipartError::ParseHeaders(
+            Ok(httparse::Status::Partial) => Err(Error::ParseHeaders(
                 ParseHeadersError::HeaderOverflow,
             )),
             Err(e) => Err(e.into()),
@@ -319,7 +319,7 @@ impl<S> MultipartStreamer<S> {
     }
 
     /// Extend the buffer, or return an error if the stream is finished.
-    fn poll_extend<E>(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), MultipartError<E>>>
+    fn poll_extend<E>(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Error<E>>>
     where
         S: TryStream<Ok = Bytes, Error = E> + Unpin,
     {
@@ -328,8 +328,8 @@ impl<S> MultipartStreamer<S> {
                 self.buf.extend_from_slice(&chunk);
                 Poll::Ready(Ok(()))
             }
-            Some(Err(e)) => Poll::Ready(Err(MultipartError::Upstream(e))),
-            None => Poll::Ready(Err(MultipartError::UnexpectedEof)),
+            Some(Err(e)) => Poll::Ready(Err(Error::Stream(e))),
+            None => Poll::Ready(Err(Error::UnexpectedEof)),
         }
     }
 }
@@ -458,12 +458,12 @@ pub enum ParseHeadersError {
 
 /// An error.
 #[derive(Debug, thiserror::Error)]
-pub enum MultipartError<E> {
-    /// Upstream error.
+pub enum Error<E> {
+    /// Underlying stream error.
     #[error("{0}")]
-    Upstream(E),
+    Stream(E),
 
-    /// Unexpected EOF
+    /// Unexpected end of file.
     #[error("unexpected eof")]
     UnexpectedEof,
 
@@ -476,19 +476,19 @@ pub enum MultipartError<E> {
     Boundary(#[from] InvalidBoundary),
 }
 
-impl<E> From<httparse::Error> for MultipartError<E> {
+impl<E> From<httparse::Error> for Error<E> {
     fn from(e: httparse::Error) -> Self {
         Self::ParseHeaders(ParseHeadersError::Http(e))
     }
 }
 
-impl<E> From<InvalidHeaderName> for MultipartError<E> {
+impl<E> From<InvalidHeaderName> for Error<E> {
     fn from(e: InvalidHeaderName) -> Self {
         Self::ParseHeaders(ParseHeadersError::InvalidName(e))
     }
 }
 
-impl<E> From<InvalidHeaderValue> for MultipartError<E> {
+impl<E> From<InvalidHeaderValue> for Error<E> {
     fn from(e: InvalidHeaderValue) -> Self {
         Self::ParseHeaders(ParseHeadersError::InvalidValue(e))
     }
