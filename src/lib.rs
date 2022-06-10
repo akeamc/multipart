@@ -287,10 +287,7 @@ impl<S> MultipartStreamer<S> {
 
                 let boundary_line_len = 2 + self.boundary.len();
 
-                let eof = self.buf.len() >= 2 + boundary_line_len
-                    && &self.buf[boundary_line_len..boundary_line_len + 2] == b"--";
-
-                // self.readline(); // remove line containing --boundary
+                let eof = self.buf.get(boundary_line_len..boundary_line_len + 2) == Some(b"--");
 
                 (chunk, Some(eof))
             }
